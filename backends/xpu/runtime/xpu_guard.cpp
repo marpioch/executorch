@@ -1,0 +1,153 @@
+/*
+ * See xpu_guard.h. Deliberately simple: a thread-local "current device" plus
+ * a process-wide, lazily-created default sycl::queue per device index, with a
+ * thread-local override (installed by the stream guard) that takes priority.
+ */
+#include <executorch/backends/xpu/runtime/xpu_guard.h>
+
+#include <executorch/runtime/platform/assert.h>
+
+#include <mutex>
+#include <unordered_map>
+#include <vector>
+
+namespace executorch::backends::xpu {
+
+namespace {
+
+thread_local int32_t g_current_device = 0;
+thread_local std::unordered_map<int32_t, sycl::queue*> g_stream_override;
+
+std::mutex g_default_queues_mutex;
+std::unordered_map<int32_t, sycl::queue> g_default_queues;
+
+sycl::queue& default_queue_for(int32_t device_index) {
+  std::lock_guard<std::mutex> lock(g_default_queues_mutex);
+  auto it = g_default_queues.find(device_index);
+  if (it != g_default_queues.end()) {
+    return it->second;
+  }
+  auto gpus = sycl::device::get_devices(sycl::info::device_type::gpu);
+  ET_CHECK_MSG(
+      device_index >= 0 && static_cast<size_t>(device_index) < gpus.size(),
+      "No XPU device at index %d (found %zu)",
+      device_index,
+      gpus.size());
+  auto [new_it, _] = g_default_queues.emplace(
+      device_index, sycl::queue(gpus[device_index]));
+  return new_it->second;
+}
+
+struct XPUGuardOpaqueImpl {
+  int32_t original_device;
+};
+
+struct XPUStreamGuardOpaqueImpl {
+  int32_t device_index;
+  sycl::queue* original_stream; // nullptr if none was overridden
+};
+
+} // namespace
+
+sycl::queue* get_or_create_xpu_queue(int32_t device_index) {
+  if (device_index < 0) {
+    device_index = g_current_device;
+  }
+  auto override_it = g_stream_override.find(device_index);
+  if (override_it != g_stream_override.end()) {
+    return override_it->second;
+  }
+  return &default_queue_for(device_index);
+}
+
+extern "C" {
+
+AOTITorchError aoti_torch_create_xpu_guard(
+    int32_t device_index,
+    XPUGuardHandle* ret_guard) {
+  if (ret_guard == nullptr) {
+    return Error::InvalidArgument;
+  }
+  auto* impl = new XPUGuardOpaqueImpl{g_current_device};
+  g_current_device = device_index;
+  *ret_guard = reinterpret_cast<XPUGuardHandle>(impl);
+  return Error::Ok;
+}
+
+AOTITorchError aoti_torch_delete_xpu_guard(XPUGuardHandle guard) {
+  if (guard == nullptr) {
+    return Error::InvalidArgument;
+  }
+  auto* impl = reinterpret_cast<XPUGuardOpaqueImpl*>(guard);
+  g_current_device = impl->original_device;
+  delete impl;
+  return Error::Ok;
+}
+
+AOTITorchError aoti_torch_xpu_guard_set_index(
+    XPUGuardHandle guard,
+    int32_t device_index) {
+  if (guard == nullptr) {
+    return Error::InvalidArgument;
+  }
+  g_current_device = device_index;
+  return Error::Ok;
+}
+
+AOTITorchError aoti_torch_create_xpu_stream_guard(
+    void* stream,
+    int32_t device_index,
+    XPUStreamGuardHandle* ret_guard) {
+  if (ret_guard == nullptr || stream == nullptr) {
+    return Error::InvalidArgument;
+  }
+  auto it = g_stream_override.find(device_index);
+  sycl::queue* original =
+      it != g_stream_override.end() ? it->second : nullptr;
+  g_stream_override[device_index] = static_cast<sycl::queue*>(stream);
+  *ret_guard = reinterpret_cast<XPUStreamGuardHandle>(
+      new XPUStreamGuardOpaqueImpl{device_index, original});
+  return Error::Ok;
+}
+
+AOTITorchError aoti_torch_delete_xpu_stream_guard(
+    XPUStreamGuardHandle guard) {
+  if (guard == nullptr) {
+    return Error::InvalidArgument;
+  }
+  auto* impl = reinterpret_cast<XPUStreamGuardOpaqueImpl*>(guard);
+  if (impl->original_stream == nullptr) {
+    g_stream_override.erase(impl->device_index);
+  } else {
+    g_stream_override[impl->device_index] = impl->original_stream;
+  }
+  delete impl;
+  return Error::Ok;
+}
+
+AOTITorchError aoti_torch_get_current_xpu_stream(
+    int32_t device_index,
+    void** ret_stream) {
+  if (ret_stream == nullptr) {
+    return Error::InvalidArgument;
+  }
+  *ret_stream = static_cast<void*>(get_or_create_xpu_queue(device_index));
+  return Error::Ok;
+}
+
+AOTITorchError aoti_torch_get_current_xpu_device(int32_t* device_index) {
+  if (device_index == nullptr) {
+    return Error::InvalidArgument;
+  }
+  *device_index = g_current_device;
+  return Error::Ok;
+}
+
+AOTITorchError aoti_torch_set_current_xpu_device(int32_t device_index) {
+  g_current_device = device_index;
+  return Error::Ok;
+}
+
+} // extern "C"
+
+} // namespace executorch::backends::xpu

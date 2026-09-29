@@ -1,0 +1,237 @@
+/*
+ * Minimal, libtorch-free BackendInterface for AOTInductor-compiled XPU
+ * methods. Loads the compiled .so, resolves the generic AOTI container
+ * function pointers (see backends/aoti/aoti_delegate_handle.h), and runs it
+ * on a queue obtained from xpu_guard. No weight/constant blob handling yet --
+ * fine for the add/mm PoC, which has no parameters.
+ */
+#include <atomic>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <string>
+#include <vector>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
+
+#include <executorch/backends/aoti/aoti_delegate_handle.h>
+#include <executorch/backends/xpu/runtime/xpu_delegate_handle.h>
+#include <executorch/backends/xpu/runtime/xpu_guard.h>
+#include <executorch/runtime/backend/interface.h>
+#include <executorch/runtime/core/error.h>
+#include <executorch/runtime/core/evalue.h>
+#include <executorch/runtime/platform/log.h>
+
+namespace executorch::backends::xpu {
+
+using executorch::backends::aoti::AOTInductorModelContainerCreateWithDeviceFunc;
+using executorch::backends::aoti::AOTInductorModelContainerDeleteFunc;
+using executorch::backends::aoti::AOTInductorModelContainerGetNumInputsFunc;
+using executorch::backends::aoti::AOTInductorModelContainerGetNumOutputsFunc;
+using executorch::backends::aoti::AOTInductorModelContainerRunFunc;
+using executorch::backends::aoti::resolve_blob_keys;
+using executorch::runtime::ArrayRef;
+using executorch::runtime::Backend;
+using executorch::runtime::BackendExecutionContext;
+using executorch::runtime::BackendInitContext;
+using executorch::runtime::CompileSpec;
+using executorch::runtime::DelegateHandle;
+using executorch::runtime::Error;
+using executorch::runtime::EValue;
+using executorch::runtime::FreeableBuffer;
+using executorch::runtime::NamedDataMap;
+using executorch::runtime::Result;
+using executorch::runtime::Span;
+using executorch::runtime::etensor::Tensor;
+
+namespace {
+
+Result<void*> load_library(const std::string& path) {
+#ifdef _WIN32
+  HMODULE lib = LoadLibraryA(path.c_str());
+  if (lib == nullptr) {
+    return Error::AccessFailed;
+  }
+  return static_cast<void*>(lib);
+#else
+  void* lib = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+  if (lib == nullptr) {
+    ET_LOG(Error, "dlopen(%s) failed: %s", path.c_str(), dlerror());
+    return Error::AccessFailed;
+  }
+  return lib;
+#endif
+}
+
+void close_library(void* lib) {
+#ifdef _WIN32
+  FreeLibrary(static_cast<HMODULE>(lib));
+#else
+  dlclose(lib);
+#endif
+}
+
+template <typename FuncT>
+Result<FuncT> get_symbol(void* lib, const char* name) {
+#ifdef _WIN32
+  auto* sym = GetProcAddress(static_cast<HMODULE>(lib), name);
+#else
+  auto* sym = dlsym(lib, name);
+#endif
+  if (sym == nullptr) {
+    ET_LOG(Error, "Could not resolve symbol %s", name);
+    return Error::AccessFailed;
+  }
+  return reinterpret_cast<FuncT>(sym);
+}
+
+} // namespace
+
+class XpuBackend final : public ::executorch::runtime::BackendInterface {
+ public:
+  bool is_available() const override {
+    return !sycl::device::get_devices(sycl::info::device_type::gpu).empty();
+  }
+
+  Result<DelegateHandle*> init(
+      BackendInitContext& context,
+      FreeableBuffer* processed,
+      ArrayRef<CompileSpec> compile_specs) const override {
+    std::string method_name;
+    for (const CompileSpec& spec : compile_specs) {
+      if (std::strcmp(spec.key, "method_name") == 0) {
+        method_name.assign(
+            static_cast<const char*>(spec.value.buffer), spec.value.nbytes);
+      }
+    }
+
+    std::string so_blob_key, weights_blob_key;
+    ET_CHECK_OK_OR_RETURN_ERROR(
+        resolve_blob_keys(processed, method_name, so_blob_key, weights_blob_key),
+        "Malformed named-data key payload");
+
+    const NamedDataMap* named_data_map = context.get_named_data_map();
+    auto so_buffer = named_data_map->get_data(so_blob_key.c_str());
+    ET_CHECK_OR_RETURN_ERROR(
+        so_buffer.ok(),
+        Internal,
+        "Failed to get data for key %s",
+        so_blob_key.c_str());
+
+    static std::atomic<uint64_t> so_file_counter{0};
+    std::filesystem::path so_path = std::filesystem::temp_directory_path() /
+        ("executorch_xpu_" +
+         std::to_string(so_file_counter.fetch_add(1, std::memory_order_relaxed)) +
+         ".so");
+
+    std::ofstream outfile(so_path, std::ios::binary);
+    outfile.write(
+        static_cast<const char*>(so_buffer->data()), so_buffer->size());
+    ET_CHECK_OR_RETURN_ERROR(
+        outfile.good(), AccessFailed, "Failed to write %s", so_path.string().c_str());
+    outfile.close();
+    so_buffer->Free();
+
+    auto lib = load_library(so_path.string());
+    if (!lib.ok()) {
+      return lib.error();
+    }
+
+    auto create_fn = get_symbol<AOTInductorModelContainerCreateWithDeviceFunc>(
+        lib.get(), "AOTInductorModelContainerCreateWithDevice");
+    auto delete_fn = get_symbol<AOTInductorModelContainerDeleteFunc>(
+        lib.get(), "AOTInductorModelContainerDelete");
+    auto num_inputs_fn = get_symbol<AOTInductorModelContainerGetNumInputsFunc>(
+        lib.get(), "AOTInductorModelContainerGetNumInputs");
+    auto num_outputs_fn = get_symbol<AOTInductorModelContainerGetNumOutputsFunc>(
+        lib.get(), "AOTInductorModelContainerGetNumOutputs");
+    auto run_fn = get_symbol<AOTInductorModelContainerRunFunc>(
+        lib.get(), "AOTInductorModelContainerRun");
+    if (!create_fn.ok() || !delete_fn.ok() || !num_inputs_fn.ok() ||
+        !num_outputs_fn.ok() || !run_fn.ok()) {
+      close_library(lib.get());
+      return Error::AccessFailed;
+    }
+
+    AOTInductorModelContainerHandle container = nullptr;
+    Error err =
+        (*create_fn.get())(&container, /*num_models=*/1, "xpu", nullptr);
+    ET_CHECK_OR_RETURN_ERROR(
+        err == Error::Ok, Internal, "Failed to create XPU AOTI container");
+
+    auto* handle = new XpuDelegateHandle();
+    handle->lib_handle = lib.get();
+    handle->container_handle = container;
+    handle->container_delete = delete_fn.get();
+    handle->get_num_inputs = num_inputs_fn.get();
+    handle->get_num_outputs = num_outputs_fn.get();
+    handle->run = run_fn.get();
+    handle->device_index = 0; // single-GPU PoC
+
+    return handle;
+  }
+
+  Error execute(
+      BackendExecutionContext& context,
+      DelegateHandle* handle_,
+      Span<EValue*> args) const override {
+    auto* handle = static_cast<XpuDelegateHandle*>(handle_);
+
+    size_t n_inputs = 0, n_outputs = 0;
+    handle->get_num_inputs(handle->container_handle, &n_inputs);
+    handle->get_num_outputs(handle->container_handle, &n_outputs);
+    ET_CHECK_OR_RETURN_ERROR(
+        n_inputs + n_outputs == args.size(),
+        InvalidArgument,
+        "expected %zu input(s) + %zu output(s), got %zu args",
+        n_inputs,
+        n_outputs,
+        args.size());
+
+    std::vector<Tensor*> input_handles(n_inputs);
+    for (size_t i = 0; i < n_inputs; i++) {
+      input_handles[i] = &(args[i]->toTensor());
+    }
+    std::vector<Tensor*> output_handles(n_outputs);
+    for (size_t i = 0; i < n_outputs; i++) {
+      output_handles[i] = &(args[n_inputs + i]->toTensor());
+    }
+
+    void* stream = get_or_create_xpu_queue(handle->device_index);
+    Error err = handle->run(
+        handle->container_handle,
+        input_handles.data(),
+        n_inputs,
+        output_handles.data(),
+        n_outputs,
+        stream,
+        /*proxy_executor_handle=*/nullptr);
+    return err;
+  }
+
+  void destroy(DelegateHandle* handle_) const override {
+    if (handle_ == nullptr) {
+      return;
+    }
+    auto* handle = static_cast<XpuDelegateHandle*>(handle_);
+    if (handle->container_delete != nullptr) {
+      handle->container_delete(handle->container_handle);
+    }
+    if (handle->lib_handle != nullptr) {
+      close_library(handle->lib_handle);
+    }
+    delete handle;
+  }
+};
+
+namespace {
+auto cls = XpuBackend();
+Backend backend{"XpuBackend", &cls};
+static auto success = ::executorch::runtime::register_backend(backend);
+} // namespace
+
+} // namespace executorch::backends::xpu
