@@ -290,22 +290,25 @@ class AotiBackend(ABC):
                     "Please add them to the AOTI backend."
                 )
 
-        # Extract paths - weights are always separated
+        # Extract paths - weights are always separated when present. The
+        # compiled wrapper's extension depends on the host platform doing the
+        # compile (not necessarily the cross-compile target): ".so" on Linux,
+        # ".pyd" on native Windows AOTI codegen.
         so_path = None
         blob_path = None
 
         if isinstance(paths, list):
             for path in paths:
-                if path.endswith(".wrapper.so"):
+                if path.endswith((".wrapper.so", ".wrapper.pyd", ".wrapper.dll")):
                     so_path = path
                 elif path.endswith(".wrapper_weights.blob"):
                     blob_path = path
         else:
             so_path = paths
 
-        if so_path is None or blob_path is None:
+        if so_path is None:
             raise RuntimeError(
-                f"Could not find required files in compiled paths, got {paths}"
+                f"Could not find required .wrapper.so/.pyd/.dll in compiled paths, got {paths}"
             )
 
         # Sign the .so for platform-specific requirements (e.g., macOS Hardened Runtime)
@@ -315,7 +318,13 @@ class AotiBackend(ABC):
         with open(so_path, "rb") as f:
             so_data = f.read()
 
-        blob_data, weights_blob_hash = cls.load_weights_blob(blob_path, compile_specs)
+        if blob_path is not None:
+            blob_data, weights_blob_hash = cls.load_weights_blob(blob_path, compile_specs)
+        else:
+            # No weights/constants were emitted (e.g. a parameter-free model);
+            # record an empty blob so the runtime's fixed two-key
+            # processed_bytes format still holds.
+            blob_data, weights_blob_hash = b"", hashlib.sha256(b"").hexdigest()
 
         # Create named data store
         named_data_store = NamedDataStore()
