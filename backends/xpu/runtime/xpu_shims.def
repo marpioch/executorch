@@ -1,0 +1,46 @@
+; Import-lib stub advertising every aoti_torch_* name the AOTInductor-generated
+; XPU wrapper can reference, so `torch._inductor.aot_compile` can resolve them
+; at link time on Windows (which -- unlike Linux .so -- requires every DLL
+; import to resolve against a named library, not "whatever the host process
+; happens to define"). Mirrors backends/cuda/runtime/aoti_cuda_shims.lib.
+;
+; The first 8 are implemented today (see runtime/xpu_guard.cpp). The rest are
+; the generic AOTI tensor/memory/misc shim contract (analogous to
+; backends/aoti/* + backends/cuda/runtime/shims/memory.cpp for CUDA) that a
+; real model's compiled wrapper also references -- not yet implemented in our
+; runtime, so linking succeeds but loading a DLL that actually calls them will
+; not, until that follow-up work lands.
+LIBRARY xpu_shims.dll
+EXPORTS
+    aoti_torch_create_xpu_guard
+    aoti_torch_delete_xpu_guard
+    aoti_torch_xpu_guard_set_index
+    aoti_torch_create_xpu_stream_guard
+    aoti_torch_delete_xpu_stream_guard
+    aoti_torch_get_current_xpu_stream
+    aoti_torch_get_current_xpu_device
+    aoti_torch_set_current_xpu_device
+    aoti_torch_get_current_sycl_queue
+    aoti_torch_device_type_cpu
+    aoti_torch_device_type_cuda
+    aoti_torch_device_type_xpu
+    aoti_torch_create_tensor_from_blob_v2
+    aoti_torch_create_tensor_from_blob
+    aoti_torch_delete_tensor_object
+    aoti_torch_get_data_ptr
+    aoti_torch_get_device_type
+    aoti_torch_new_tensor_handle
+    aoti_torch_get_storage_size
+    aoti_torch_get_strides
+    aoti_torch_get_storage_offset
+    aoti_torch_clone
+    aoti_torch_clone_preserve_strides
+    aoti_torch_grad_mode_set_enabled
+    aoti_torch_grad_mode_is_enabled
+    aoti_torch_empty_strided
+    aoti_torch_warn
+    aoti_torch_get_dim
+    aoti_torch_get_numel
+    aoti_torch_get_sizes
+    aoti_torch_get_dtype
+    aoti_torch_dtype_float32
