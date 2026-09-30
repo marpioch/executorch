@@ -1,4 +1,5 @@
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+from contextlib import contextmanager
 from pathlib import Path
 
 from executorch.backends.aoti.aoti_backend import AotiBackend
@@ -9,6 +10,26 @@ from executorch.exir.backend.compile_spec_schema import CompileSpec
 # reference (see backends/xpu/runtime/xpu_shims.def); mirrors CudaBackend's
 # Windows-only aoti_cuda_shims.lib mechanism (cuda_backend.py get_aoti_compile_options).
 _XPU_SHIM_LIBRARY_DIR = Path(__file__).parent / "runtime"
+
+
+@contextmanager
+def _skip_mingw_cross_compile_probe():
+    """torch._inductor.cpp_builder.get_cpp_options() probes for a MinGW
+    cross-compiler whenever aot_inductor.cross_target_platform == "windows",
+    with no check for whether we're already natively on Windows (unlike
+    get_cpp_compiler(), which correctly gates that same flag behind
+    sys.platform != "win32"). We set cross_target_platform="windows" purely to
+    get the xpu_shims.lib linking behavior below; there's no MinGW toolchain to
+    probe for on a native Windows host. Stub the probe out for this compile.
+    """
+    from torch._inductor import cpp_builder
+
+    orig = cpp_builder.check_mingw_win32_flavor
+    cpp_builder.check_mingw_win32_flavor = lambda compiler: "win32"
+    try:
+        yield
+    finally:
+        cpp_builder.check_mingw_win32_flavor = orig
 
 
 class XpuBackend(AotiBackend, BackendDetails):
@@ -36,6 +57,12 @@ class XpuBackend(AotiBackend, BackendDetails):
         return []
 
     @classmethod
+    def get_extra_aoti_compile_context_manager(
+        cls, compile_specs: Optional[List[CompileSpec]] = None
+    ):
+        return _skip_mingw_cross_compile_probe()
+
+    @classmethod
     def get_aoti_compile_options(
         cls, compile_specs: List[CompileSpec]
     ) -> Dict[str, Any]:
@@ -55,4 +82,5 @@ class XpuBackend(AotiBackend, BackendDetails):
             "aot_inductor.aoti_shim_library_path": str(_XPU_SHIM_LIBRARY_DIR),
             "aot_inductor.precompile_headers": False,
         }
+
 
