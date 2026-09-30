@@ -44,3 +44,12 @@ EXPORTS
     aoti_torch_get_sizes
     aoti_torch_get_dtype
     aoti_torch_dtype_float32
+
+    ; Not part of the aoti_torch_* C shim: Triton-XPU kernel-launch wrapper
+    ; code (torch/csrc/inductor/aoti_runtime/sycl_runtime_wrappers.h) calls
+    ; these C++-mangled c10::xpu::* symbols directly to bridge an abstract
+    ; sycl::device/context down to native Level-Zero handles for
+    ; zeModuleCreate/zeKernelCreate. Not implemented in our runtime yet.
+    ?current_device@xpu@c10@@YACXZ
+    ?get_raw_device@xpu@c10@@YAAEAVdevice@_V1@sycl@@C@Z
+    ?get_device_context@xpu@c10@@YAAEAVcontext@_V1@sycl@@XZ
