@@ -14,6 +14,7 @@ if(NOT EXECUTORCH_ROOT)
 endif()
 
 include(${EXECUTORCH_ROOT}/tools/cmake/Utils.cmake)
+find_package_torch()
 
 if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
   message(
@@ -24,9 +25,34 @@ if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
   )
 endif()
 
+# Real shim library the AOTInductor-compiled model DLL links against at
+# runtime (see runtime/xpu_shims.def/.lib for the separate, compile-time-only
+# stub import library torch._inductor.aot_compile links against instead).
+# Generic aoti_torch_* tensor/memory/misc shims come from aoti_common; only
+# the XPU-specific guard/stream/device-pool/memory pieces are our own code.
 add_library(
-  xpu_backend STATIC runtime/xpu_backend.cpp runtime/xpu_guard.cpp
+  xpu_shims SHARED
+  runtime/xpu_guard.cpp
+  runtime/xpu_functions.cpp
+  runtime/xpu_tensor_attribute.cpp
+  runtime/xpu_memory.cpp
 )
+
+target_include_directories(
+  xpu_shims PUBLIC $<BUILD_INTERFACE:${EXECUTORCH_ROOT}>
+                   $<BUILD_INTERFACE:${EXECUTORCH_ROOT}/..>
+                   $<INSTALL_INTERFACE:include>
+)
+
+target_compile_options(xpu_shims PRIVATE -fsycl)
+target_link_options(xpu_shims PUBLIC -fsycl)
+target_compile_definitions(xpu_shims PRIVATE EXPORT_AOTI_FUNCTIONS)
+
+target_link_libraries(xpu_shims PUBLIC aoti_common)
+
+install(TARGETS xpu_shims EXPORT ExecuTorchTargets DESTINATION ${CMAKE_INSTALL_LIBDIR})
+
+add_library(xpu_backend STATIC runtime/xpu_backend.cpp)
 
 target_include_directories(
   xpu_backend PUBLIC $<BUILD_INTERFACE:${EXECUTORCH_ROOT}>
@@ -38,7 +64,7 @@ target_include_directories(
 target_compile_options(xpu_backend PRIVATE -fsycl)
 target_link_options(xpu_backend PUBLIC -fsycl)
 
-target_link_libraries(xpu_backend PUBLIC executorch_core ${CMAKE_DL_LIBS})
+target_link_libraries(xpu_backend PUBLIC executorch_core xpu_shims ${CMAKE_DL_LIBS})
 
 # Backend registration (the static `register_backend()` call in
 # xpu_backend.cpp) must survive linking even though nothing else references

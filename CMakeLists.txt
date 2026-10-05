@@ -911,6 +911,7 @@ if(EXECUTORCH_BUILD_CUDA
    OR EXECUTORCH_BUILD_ROCM
    OR EXECUTORCH_BUILD_METAL
    OR EXECUTORCH_BUILD_PYBIND
+   OR EXECUTORCH_BUILD_XPU
 )
   find_package_torch()
 endif()
@@ -929,10 +930,12 @@ if(EXECUTORCH_BUILD_CUDA OR EXECUTORCH_BUILD_ROCM)
   list(APPEND _executorch_extensions extension_cuda)
 endif()
 
-# Build common AOTI functionality if needed by CUDA, ROCm, or Metal backends.
+# Build common AOTI functionality if needed by CUDA, ROCm, Metal, or XPU
+# backends.
 if(EXECUTORCH_BUILD_CUDA
    OR EXECUTORCH_BUILD_ROCM
    OR EXECUTORCH_BUILD_METAL
+   OR EXECUTORCH_BUILD_XPU
 )
   add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/backends/aoti)
 endif()

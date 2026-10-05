@@ -43,8 +43,16 @@ AOTI_SHIM_EXPORT AOTITorchError
 aoti_torch_get_current_xpu_stream(int32_t device_index, void** ret_stream);
 AOTI_SHIM_EXPORT AOTITorchError
 aoti_torch_get_current_xpu_device(int32_t* device_index);
+// Matches torch's real shim_xpu.h signature exactly: a by-value int32_t here
+// would silently corrupt the call, since extern "C" linkage means no
+// mangling -- and thus no compile-time ABI check -- catches the mismatch.
 AOTI_SHIM_EXPORT AOTITorchError
-aoti_torch_set_current_xpu_device(int32_t device_index);
+aoti_torch_set_current_xpu_device(const int32_t& device_index);
+
+// Not part of the XPU guard/stream contract above, but same shape: called
+// directly by AOTInductor's generated kernel-launch code to get a queue for
+// the *current* device (c10::xpu::current_device()), no index parameter.
+AOTI_SHIM_EXPORT AOTITorchError aoti_torch_get_current_sycl_queue(void** ret);
 
 } // extern "C"
 
