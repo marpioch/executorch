@@ -52,7 +52,7 @@ target_link_libraries(xpu_shims PUBLIC aoti_common)
 
 install(TARGETS xpu_shims EXPORT ExecuTorchTargets DESTINATION ${CMAKE_INSTALL_LIBDIR})
 
-add_library(xpu_backend STATIC runtime/xpu_backend.cpp)
+add_library(xpu_backend STATIC runtime/xpu_backend.cpp runtime/xpu_allocator.cpp)
 
 target_include_directories(
   xpu_backend PUBLIC $<BUILD_INTERFACE:${EXECUTORCH_ROOT}>

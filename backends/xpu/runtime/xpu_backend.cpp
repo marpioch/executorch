@@ -19,9 +19,11 @@
 #endif
 
 #include <executorch/backends/aoti/aoti_delegate_handle.h>
+#include <executorch/backends/xpu/runtime/xpu_allocator.h>
 #include <executorch/backends/xpu/runtime/xpu_delegate_handle.h>
 #include <executorch/backends/xpu/runtime/xpu_guard.h>
 #include <executorch/runtime/backend/interface.h>
+#include <executorch/runtime/core/device_allocator.h>
 #include <executorch/runtime/core/error.h>
 #include <executorch/runtime/core/evalue.h>
 #include <executorch/runtime/platform/log.h>
@@ -232,6 +234,14 @@ namespace {
 auto cls = XpuBackend();
 Backend backend{"XpuBackend", &cls};
 static auto success = ::executorch::runtime::register_backend(backend);
+
+// Auto-register the XpuAllocator so device-aware memory planning can
+// allocate the delegate's XPU-tagged planned buffers whenever this backend
+// library is linked (mirrors backends/cuda/runtime/cuda_backend.cpp).
+static bool xpu_allocator_registered = [] {
+  executorch::runtime::register_device_allocator(&XpuAllocator::instance());
+  return true;
+}();
 } // namespace
 
 } // namespace executorch::backends::xpu
