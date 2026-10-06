@@ -19,13 +19,17 @@
 #endif
 
 #include <executorch/backends/aoti/aoti_delegate_handle.h>
+#include <executorch/backends/aoti/utils.h>
 #include <executorch/backends/xpu/runtime/xpu_allocator.h>
 #include <executorch/backends/xpu/runtime/xpu_delegate_handle.h>
 #include <executorch/backends/xpu/runtime/xpu_guard.h>
+#include <executorch/backends/xpu/runtime/xpu_memory.h>
+#include <executorch/backends/xpu/runtime/xpu_tensor_attribute.h>
 #include <executorch/runtime/backend/interface.h>
 #include <executorch/runtime/core/device_allocator.h>
 #include <executorch/runtime/core/error.h>
 #include <executorch/runtime/core/evalue.h>
+#include <executorch/runtime/core/exec_aten/util/tensor_util.h>
 #include <executorch/runtime/platform/log.h>
 
 namespace executorch::backends::xpu {
@@ -194,25 +198,111 @@ class XpuBackend final : public ::executorch::runtime::BackendInterface {
         n_outputs,
         args.size());
 
-    std::vector<Tensor*> input_handles(n_inputs);
+    const int32_t xpu_device_type = aoti_torch_device_type_xpu();
+
+    // ExecuTorch's own Tensor* args are host-resident and were never
+    // registered with xpu_memory.cpp's tracking maps. AOTInductor's
+    // generated code treats every handle it touches as RAII-owned (it calls
+    // aoti_torch_delete_tensor_object on inputs once it's done with them, and
+    // may replace our output handles with its own) -- passing the raw args
+    // straight into Run() means that cleanup can't find them and aborts. So
+    // wrap each input/output as a tracked XPU tensor first, mirroring
+    // backends/apple/metal/runtime/metal_backend.cpp's execute().
+    std::vector<Tensor*> xpu_inputs(n_inputs, nullptr);
+    std::vector<Tensor*> xpu_outputs(n_outputs, nullptr);
+    std::vector<Tensor*> pre_run_outputs(n_outputs, nullptr);
+    bool run_called = false;
+
+    executorch::backends::aoti::ScopeGuard cleanup([&]() noexcept {
+      if (!run_called) {
+        for (auto* t : xpu_inputs) {
+          if (t != nullptr) {
+            aoti_torch_delete_tensor_object(t);
+          }
+        }
+      }
+      for (size_t i = 0; i < xpu_outputs.size(); i++) {
+        if (pre_run_outputs[i] != nullptr &&
+            pre_run_outputs[i] != xpu_outputs[i]) {
+          aoti_torch_delete_tensor_object(pre_run_outputs[i]);
+        }
+        if (xpu_outputs[i] != nullptr) {
+          aoti_torch_delete_tensor_object(xpu_outputs[i]);
+        }
+      }
+    });
+
     for (size_t i = 0; i < n_inputs; i++) {
-      input_handles[i] = &(args[i]->toTensor());
+      auto* cpu_tensor = &(args[i]->toTensor());
+      auto sizes = cpu_tensor->sizes();
+      std::vector<int64_t> sizes_vec(sizes.begin(), sizes.end());
+      ET_CHECK_OK_OR_RETURN_ERROR(
+          aoti_torch_empty_strided(
+              sizes_vec.size(),
+              sizes_vec.data(),
+              nullptr,
+              static_cast<int32_t>(cpu_tensor->scalar_type()),
+              xpu_device_type,
+              handle->device_index,
+              &xpu_inputs[i]),
+          "Failed to create XPU tensor for input %zu",
+          i);
+      ET_CHECK_OK_OR_RETURN_ERROR(
+          aoti_torch_copy_(xpu_inputs[i], cpu_tensor, 0),
+          "Failed to copy input %zu from CPU to XPU",
+          i);
     }
-    std::vector<Tensor*> output_handles(n_outputs);
+
     for (size_t i = 0; i < n_outputs; i++) {
-      output_handles[i] = &(args[n_inputs + i]->toTensor());
+      auto* cpu_tensor = &(args[n_inputs + i]->toTensor());
+      auto sizes = cpu_tensor->sizes();
+      std::vector<int64_t> sizes_vec(sizes.begin(), sizes.end());
+      ET_CHECK_OK_OR_RETURN_ERROR(
+          aoti_torch_empty_strided(
+              sizes_vec.size(),
+              sizes_vec.data(),
+              nullptr,
+              static_cast<int32_t>(cpu_tensor->scalar_type()),
+              xpu_device_type,
+              handle->device_index,
+              &xpu_outputs[i]),
+          "Failed to create XPU tensor for output %zu",
+          i);
+      pre_run_outputs[i] = xpu_outputs[i];
     }
 
     void* stream = get_or_create_xpu_queue(handle->device_index);
     Error err = handle->run(
         handle->container_handle,
-        input_handles.data(),
+        xpu_inputs.data(),
         n_inputs,
-        output_handles.data(),
+        xpu_outputs.data(),
         n_outputs,
         stream,
         /*proxy_executor_handle=*/nullptr);
-    return err;
+    run_called = true;
+    if (err != Error::Ok) {
+      return err;
+    }
+
+    // Make sure the kernel(s) actually finished before reading results back.
+    static_cast<sycl::queue*>(stream)->wait();
+
+    for (size_t i = 0; i < n_outputs; i++) {
+      auto* cpu_tensor = &(args[n_inputs + i]->toTensor());
+      ET_CHECK_OK_OR_RETURN_ERROR(
+          executorch::runtime::resize_tensor(
+              *cpu_tensor, xpu_outputs[i]->sizes()),
+          "Failed to resize output %zu",
+          i);
+      ET_CHECK_OK_OR_RETURN_ERROR(
+          aoti_torch_copy_(cpu_tensor, xpu_outputs[i], 0),
+          "Failed to copy output %zu from XPU to CPU",
+          i);
+    }
+
+    // ScopeGuard destructor deletes the tracked XPU input/output handles.
+    return Error::Ok;
   }
 
   void destroy(DelegateHandle* handle_) const override {

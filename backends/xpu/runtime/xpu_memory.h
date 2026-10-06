@@ -45,6 +45,14 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_empty_strided(
     int32_t device_index,
     Tensor** ret_new_tensor);
 
+// Not part of xpu_shims.def's real-linker-reported list, but needed by
+// xpu_backend.cpp's execute(): copies raw bytes between a CPU tensor and an
+// XPU tensor allocated via aoti_torch_empty_strided. Both live in SYCL USM
+// "shared" memory or plain host memory, both host-visible, so a plain memcpy
+// suffices (no real host<->device transfer like Metal/CUDA need).
+AOTI_SHIM_EXPORT AOTITorchError
+aoti_torch_copy_(Tensor* self, Tensor* src, int32_t non_blocking);
+
 AOTI_SHIM_EXPORT AOTITorchError
 aoti_torch_delete_tensor_object(Tensor* tensor);
 

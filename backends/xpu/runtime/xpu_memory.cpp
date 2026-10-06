@@ -9,6 +9,7 @@
 #include <sycl/sycl.hpp>
 
 #include <algorithm>
+#include <cstring>
 #include <numeric>
 #include <unordered_map>
 
@@ -233,6 +234,20 @@ AOTITorchError aoti_torch_new_tensor_handle(
   if (memory_it->second != NOT_OWN) {
     memory_it->second += 1;
   }
+  return Error::Ok;
+}
+
+AOTITorchError aoti_torch_copy_(Tensor* self, Tensor* src, int32_t non_blocking) {
+  (void)non_blocking;
+  ET_CHECK_OR_RETURN_ERROR(
+      self != nullptr && src != nullptr, InvalidArgument, "null tensor");
+  ET_CHECK_OR_RETURN_ERROR(
+      self->nbytes() == src->nbytes(),
+      InvalidArgument,
+      "aoti_torch_copy_ size mismatch: %zu vs %zu bytes",
+      self->nbytes(),
+      src->nbytes());
+  std::memcpy(self->mutable_data_ptr(), src->const_data_ptr(), src->nbytes());
   return Error::Ok;
 }
 
