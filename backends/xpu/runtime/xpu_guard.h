@@ -56,8 +56,9 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_get_current_sycl_queue(void** ret);
 
 } // extern "C"
 
-// Not part of the AOTI shim ABI; used directly by xpu_backend.cpp to obtain
-// the queue to run a container invocation on.
-sycl::queue* get_or_create_xpu_queue(int32_t device_index);
+// Not part of the AOTI shim ABI; used directly by xpu_backend.cpp (now a
+// separate static lib linked against this DLL) to obtain the queue to run a
+// container invocation on -- needs dllexport for that cross-DLL call to link.
+AOTI_SHIM_EXPORT sycl::queue* get_or_create_xpu_queue(int32_t device_index);
 
 } // namespace executorch::backends::xpu
