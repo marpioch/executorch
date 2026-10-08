@@ -55,25 +55,6 @@ class XpuBackend(AotiBackend, BackendDetails):
         return {}
 
     @classmethod
-    def materialize_weights_blob(
-        cls, paths: Any, compile_specs: List[CompileSpec]
-    ) -> Any:
-        # Debug aid while bringing up the GEMM/oneDNN path: confirms whether
-        # torch._inductor actually produced a non-empty *.wrapper_weights.blob
-        # for this compile (see package_constants_on_disk_format below).
-        import os
-        import sys
-
-        path_list = paths if isinstance(paths, list) else [paths]
-        for path in path_list:
-            size = os.path.getsize(path) if os.path.exists(path) else -1
-            print(
-                f"XpuBackend::materialize_weights_blob - path={path} size={size}",
-                file=sys.stderr,
-            )
-        return paths
-
-    @classmethod
     def get_custom_passes(cls, compile_specs: List[CompileSpec]) -> List[Any]:
         return []
 

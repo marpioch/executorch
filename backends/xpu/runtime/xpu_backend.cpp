@@ -178,12 +178,6 @@ class XpuBackend final : public ::executorch::runtime::BackendInterface {
     // (e.g. aoti_torch__reinterpret_tensor on the weight) fails with "self is
     // null". Mirrors backends/apple/metal/runtime/metal_backend.cpp's init().
     auto weights_buffer = named_data_map->get_data(weights_blob_key.c_str());
-    ET_LOG(
-        Info,
-        "XpuBackend::init - weights_blob_key=%s found=%d size=%zu",
-        weights_blob_key.c_str(),
-        weights_buffer.ok(),
-        weights_buffer.ok() ? weights_buffer->size() : 0);
     if (weights_buffer.ok()) {
       ET_CHECK_OK_OR_RETURN_ERROR(
           (*update_constants_fn.get())(
