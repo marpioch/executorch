@@ -4,12 +4,12 @@
 ; import to resolve against a named library, not "whatever the host process
 ; happens to define"). Mirrors backends/cuda/runtime/aoti_cuda_shims.lib.
 ;
-; The first 8 are implemented today (see runtime/xpu_guard.cpp). The rest are
-; the generic AOTI tensor/memory/misc shim contract (analogous to
-; backends/aoti/* + backends/cuda/runtime/shims/memory.cpp for CUDA) that a
-; real model's compiled wrapper also references -- not yet implemented in our
-; runtime, so linking succeeds but loading a DLL that actually calls them will
-; not, until that follow-up work lands.
+; Implemented in runtime/xpu_guard.cpp (device/stream guards), xpu_memory.cpp
+; (tensor/memory shims), xpu_tensor_attribute.cpp (device-type constants),
+; and xpu_gemm.cpp (oneDNN-backed mm). aoti_torch_layout_strided comes from
+; the generic backends/aoti/common_shims.cpp, linked in via aoti_common.
+; Anything still missing falls back to common_shims.cpp's throwing stubs
+; until a model that needs it surfaces a load-time error.
 LIBRARY xpu_shims.dll
 EXPORTS
     aoti_torch_create_xpu_guard
@@ -44,6 +44,9 @@ EXPORTS
     aoti_torch_get_sizes
     aoti_torch_get_dtype
     aoti_torch_dtype_float32
+    aoti_torch_layout_strided
+    aoti_torch__reinterpret_tensor
+    aoti_torch_xpu_mm_out
 
     ; Not part of the aoti_torch_* C shim: Triton-XPU kernel-launch wrapper
     ; code (torch/csrc/inductor/aoti_runtime/sycl_runtime_wrappers.h) calls

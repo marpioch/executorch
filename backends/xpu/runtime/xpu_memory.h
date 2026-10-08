@@ -59,6 +59,17 @@ aoti_torch_delete_tensor_object(Tensor* tensor);
 AOTI_SHIM_EXPORT AOTITorchError
 aoti_torch_new_tensor_handle(Tensor* orig_handle, Tensor** new_handle);
 
+// Creates a view into `self`'s existing storage with new sizes/strides/
+// storage_offset (AOTInductor's generated wrapper uses this for view ops
+// instead of calling empty_strided + copy).
+AOTI_SHIM_EXPORT AOTITorchError aoti_torch__reinterpret_tensor(
+    Tensor* self,
+    int64_t ndim,
+    const int64_t* sizes_ptr,
+    const int64_t* strides_ptr,
+    int64_t storage_offset,
+    Tensor** ret_new_tensor);
+
 } // extern "C"
 
 } // namespace executorch::backends::xpu

@@ -16,6 +16,13 @@ endif()
 include(${EXECUTORCH_ROOT}/tools/cmake/Utils.cmake)
 find_package_torch()
 
+# Pre-built standalone oneDNN (DNNL_GPU_RUNTIME=SYCL, DNNL_LIBRARY_TYPE=STATIC)
+# backing the GEMM shim (xpu_gemm.cpp). See /memories/repo/xpu-backend.md for
+# how this was built; not yet vendored/fetched automatically.
+if(NOT ONEDNN_ROOT)
+  set(ONEDNN_ROOT "C:/workspace/oneDNN")
+endif()
+
 if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
   message(
     FATAL_ERROR
@@ -36,12 +43,14 @@ add_library(
   runtime/xpu_functions.cpp
   runtime/xpu_tensor_attribute.cpp
   runtime/xpu_memory.cpp
+  runtime/xpu_gemm.cpp
 )
 
 target_include_directories(
   xpu_shims PUBLIC $<BUILD_INTERFACE:${EXECUTORCH_ROOT}>
                    $<BUILD_INTERFACE:${EXECUTORCH_ROOT}/..>
                    $<INSTALL_INTERFACE:include>
+  PRIVATE ${ONEDNN_ROOT}/include ${ONEDNN_ROOT}/build/include
 )
 
 target_compile_options(xpu_shims PRIVATE -fsycl)
@@ -49,6 +58,7 @@ target_link_options(xpu_shims PUBLIC -fsycl)
 target_compile_definitions(xpu_shims PRIVATE EXPORT_AOTI_FUNCTIONS)
 
 target_link_libraries(xpu_shims PUBLIC aoti_common)
+target_link_libraries(xpu_shims PRIVATE ${ONEDNN_ROOT}/build/src/dnnl.lib)
 
 install(TARGETS xpu_shims EXPORT ExecuTorchTargets DESTINATION ${CMAKE_INSTALL_LIBDIR})
 

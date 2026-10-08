@@ -237,6 +237,74 @@ AOTITorchError aoti_torch_new_tensor_handle(
   return Error::Ok;
 }
 
+AOTITorchError aoti_torch__reinterpret_tensor(
+    Tensor* self,
+    int64_t ndim,
+    const int64_t* sizes_ptr,
+    const int64_t* strides_ptr,
+    int64_t storage_offset,
+    Tensor** ret_new_tensor) {
+  ET_CHECK_OR_RETURN_ERROR(
+      self != nullptr,
+      InvalidArgument,
+      "aoti_torch__reinterpret_tensor: self is null");
+  ET_CHECK_OR_RETURN_ERROR(
+      ret_new_tensor != nullptr,
+      InvalidArgument,
+      "aoti_torch__reinterpret_tensor: ret_new_tensor is null");
+  ET_CHECK_OR_RETURN_ERROR(
+      ndim >= 0,
+      InvalidArgument,
+      "aoti_torch__reinterpret_tensor: ndim must be >= 0, got %lld",
+      static_cast<long long>(ndim));
+  ET_CHECK_OR_RETURN_ERROR(
+      !(sizes_ptr == nullptr && ndim > 0),
+      InvalidArgument,
+      "aoti_torch__reinterpret_tensor: sizes_ptr is null but ndim > 0");
+
+  int32_t dtype;
+  ET_CHECK_OK_OR_RETURN_ERROR(aoti_torch_get_dtype(self, &dtype));
+  ET_CHECK_OK_OR_RETURN_ERROR(validate_dtype(dtype));
+
+  void* data_ptr = self->mutable_data_ptr();
+  ET_CHECK_OR_RETURN_ERROR(
+      data_ptr != nullptr,
+      InvalidArgument,
+      "aoti_torch__reinterpret_tensor: source tensor has null data pointer");
+
+  auto memory_it = memory_to_n_tensor.find(data_ptr);
+  ET_CHECK_OR_RETURN_ERROR(
+      memory_it != memory_to_n_tensor.end(),
+      InvalidArgument,
+      "Memory address %p is not being tracked by reference counting system",
+      data_ptr);
+
+  size_t element_size = dtype_to_element_size(dtype);
+  void* adjusted_data =
+      static_cast<char*>(data_ptr) + (storage_offset * element_size);
+
+  auto sizes = convert_sizes_to_vector(ndim, sizes_ptr);
+  auto strides = convert_strides_to_vector(ndim, sizes_ptr, strides_ptr);
+
+  // ETensor supports arbitrary strides directly (see make_strided_tensor
+  // above), so unlike Metal's MTLBuffer-backed shim this never needs to
+  // materialize non-packed views into a new contiguous buffer.
+  auto tensor = make_strided_tensor(
+      adjusted_data, sizes, strides, dtype_to_scalar_type(dtype));
+  ET_CHECK_OR_RETURN_ERROR(
+      tensor != nullptr,
+      InvalidArgument,
+      "aoti_torch__reinterpret_tensor: failed to create tensor view");
+
+  tensors[tensor.get()] = tensor;
+  *ret_new_tensor = tensor.get();
+
+  if (memory_it->second != NOT_OWN) {
+    memory_it->second += 1;
+  }
+  return Error::Ok;
+}
+
 AOTITorchError aoti_torch_copy_(Tensor* self, Tensor* src, int32_t non_blocking) {
   (void)non_blocking;
   ET_CHECK_OR_RETURN_ERROR(
