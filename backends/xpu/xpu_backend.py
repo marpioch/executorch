@@ -71,7 +71,6 @@ class XpuBackend(AotiBackend, BackendDetails):
             "aot_inductor.package_constants_in_so": False,
             "aot_inductor.link_libtorch": False,
             "max_autotune": True,
-            "max_autotune_gemm_backends": "TRITON",
             # Windows-only, but this PoC only targets Windows so no platform
             # branch yet (unlike CudaBackend, which parses a "platform" spec).
             # Without this, the AOTI-compiled DLL can't resolve aoti_torch_*
