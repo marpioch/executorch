@@ -71,6 +71,13 @@ class XpuBackend(AotiBackend, BackendDetails):
         return {
             "aot_inductor.package": True,
             "aot_inductor.package_constants_in_so": False,
+            # Required whenever package_constants_in_so=False + cross_target_
+            # platform="windows": without this, torch._inductor never
+            # serializes constants anywhere (not into the .so, not into a
+            # blob), so AOTInductorModelUpdateConstantsFromBlob has nothing to
+            # load and every constant (e.g. nn.Linear's weight/bias) stays a
+            # null AtenTensorHandle at runtime.
+            "aot_inductor.package_constants_on_disk_format": "binary_blob",
             "aot_inductor.link_libtorch": False,
             "max_autotune": True,
             # Windows-only, but this PoC only targets Windows so no platform

@@ -1,9 +1,8 @@
 /*
  * Minimal, libtorch-free BackendInterface for AOTInductor-compiled XPU
  * methods. Loads the compiled .so, resolves the generic AOTI container
- * function pointers (see backends/aoti/aoti_delegate_handle.h), and runs it
- * on a queue obtained from xpu_guard. No weight/constant blob handling yet --
- * fine for the add/mm PoC, which has no parameters.
+ * function pointers (see backends/aoti/aoti_delegate_handle.h), feeds in any
+ * weights/constants blob, and runs it on a queue obtained from xpu_guard.
  */
 #include <atomic>
 #include <cstring>
@@ -39,6 +38,7 @@ using executorch::backends::aoti::AOTInductorModelContainerDeleteFunc;
 using executorch::backends::aoti::AOTInductorModelContainerGetNumInputsFunc;
 using executorch::backends::aoti::AOTInductorModelContainerGetNumOutputsFunc;
 using executorch::backends::aoti::AOTInductorModelContainerRunFunc;
+using executorch::backends::aoti::AOTInductorModelUpdateConstantsFromBlobFunc;
 using executorch::backends::aoti::resolve_blob_keys;
 using executorch::runtime::ArrayRef;
 using executorch::runtime::Backend;
@@ -157,8 +157,11 @@ class XpuBackend final : public ::executorch::runtime::BackendInterface {
         lib.get(), "AOTInductorModelContainerGetNumOutputs");
     auto run_fn = get_symbol<AOTInductorModelContainerRunFunc>(
         lib.get(), "AOTInductorModelContainerRun");
+    auto update_constants_fn =
+        get_symbol<AOTInductorModelUpdateConstantsFromBlobFunc>(
+            lib.get(), "AOTInductorModelUpdateConstantsFromBlob");
     if (!create_fn.ok() || !delete_fn.ok() || !num_inputs_fn.ok() ||
-        !num_outputs_fn.ok() || !run_fn.ok()) {
+        !num_outputs_fn.ok() || !run_fn.ok() || !update_constants_fn.ok()) {
       close_library(lib.get());
       return Error::AccessFailed;
     }
@@ -169,6 +172,27 @@ class XpuBackend final : public ::executorch::runtime::BackendInterface {
     ET_CHECK_OR_RETURN_ERROR(
         err == Error::Ok, Internal, "Failed to create XPU AOTI container");
 
+    // Feed the model's parameters/buffers (e.g. nn.Linear's weight/bias) into
+    // the container -- without this, every constant tensor the compiled
+    // wrapper references stays a null AtenTensorHandle, so any op touching it
+    // (e.g. aoti_torch__reinterpret_tensor on the weight) fails with "self is
+    // null". Mirrors backends/apple/metal/runtime/metal_backend.cpp's init().
+    auto weights_buffer = named_data_map->get_data(weights_blob_key.c_str());
+    ET_LOG(
+        Info,
+        "XpuBackend::init - weights_blob_key=%s found=%d size=%zu",
+        weights_blob_key.c_str(),
+        weights_buffer.ok(),
+        weights_buffer.ok() ? weights_buffer->size() : 0);
+    if (weights_buffer.ok()) {
+      ET_CHECK_OK_OR_RETURN_ERROR(
+          (*update_constants_fn.get())(
+              container, static_cast<const uint8_t*>(weights_buffer->data())),
+          "Failed to load weights blob %s",
+          weights_blob_key.c_str());
+      weights_buffer->Free();
+    }
+
     auto* handle = new XpuDelegateHandle();
     handle->lib_handle = lib.get();
     handle->container_handle = container;
@@ -176,6 +200,7 @@ class XpuBackend final : public ::executorch::runtime::BackendInterface {
     handle->get_num_inputs = num_inputs_fn.get();
     handle->get_num_outputs = num_outputs_fn.get();
     handle->run = run_fn.get();
+    handle->update_constants_from_blob = update_constants_fn.get();
     handle->device_index = 0; // single-GPU PoC
 
     return handle;
