@@ -46,7 +46,9 @@ class XpuBackend(AotiBackend, BackendDetails):
 
     @classmethod
     def get_supported_fallback_kernels(cls) -> Dict[str, Any]:
-        return {}
+        return {
+            "aoti_torch_xpu_mm_out": None,
+        }
 
     @classmethod
     def get_decomposition_table(cls) -> Dict[Any, Any]:
