@@ -9,40 +9,15 @@
 
 #include <executorch/backends/xpu/runtime/xpu_functions.h>
 #include <executorch/backends/xpu/runtime/xpu_guard.h>
+#include <executorch/backends/xpu/runtime/xpu_onednn_utils.h>
 #include <executorch/runtime/platform/log.h>
 
 #include <dnnl.hpp>
 #include <dnnl_sycl.hpp>
 
-#include <mutex>
-#include <unordered_map>
-
 namespace executorch::backends::xpu {
 
 namespace {
-
-std::mutex g_engines_mutex;
-std::unordered_map<int32_t, dnnl::engine> g_engines;
-
-// Lazily creates one oneDNN engine per device index, wrapping the same
-// sycl::device/context the rest of the runtime (xpu_functions.cpp) already
-// uses, so GEMM memory objects alias the same USM allocations other shims
-// wrote to. Mirrors GpuEngineManager (detail/oneDNNContext.cpp), which we
-// can't reuse directly since it is only reachable through libtorch.
-dnnl::engine& engine_for(int32_t device_index) {
-  std::lock_guard<std::mutex> lock(g_engines_mutex);
-  auto it = g_engines.find(device_index);
-  if (it != g_engines.end()) {
-    return it->second;
-  }
-  auto [new_it, inserted] = g_engines.emplace(
-      device_index,
-      dnnl::sycl_interop::make_engine(
-          c10::xpu::get_raw_device(device_index),
-          c10::xpu::get_device_context()));
-  (void)inserted;
-  return new_it->second;
-}
 
 // Mirrors at::native::onednn::make_onednn_memory (detail/Utils.cpp).
 dnnl::memory make_onednn_memory(
@@ -54,16 +29,6 @@ dnnl::memory make_onednn_memory(
       engine,
       dnnl::sycl_interop::memory_kind::usm,
       ptr == nullptr ? DNNL_MEMORY_ALLOCATE : ptr);
-}
-
-dnnl::memory::dims dims_of(Tensor* t) {
-  auto sizes = t->sizes();
-  return dnnl::memory::dims(sizes.begin(), sizes.end());
-}
-
-dnnl::memory::dims strides_of(Tensor* t) {
-  auto strides = t->strides();
-  return dnnl::memory::dims(strides.begin(), strides.end());
 }
 
 // Mirrors the core requirement of at::native::onednn::is_onednn_matmul_strides
@@ -104,18 +69,18 @@ AOTITorchError aoti_torch_xpu_mm_out(Tensor* out, Tensor* self, Tensor* mat2) {
 
   try {
     int32_t device_index = c10::xpu::current_device();
-    dnnl::engine& eng = engine_for(device_index);
+    dnnl::engine& eng = onednn_engine_for(device_index);
     sycl::queue* q = get_or_create_xpu_queue(device_index);
     dnnl::stream strm = dnnl::sycl_interop::make_stream(eng, *q);
 
     // mat2 is already [k, n] (mm_out's m2_trans=true convention), so its own
     // strides are used as-is -- no logical transpose needed.
     dnnl::memory::desc self_md(
-        dims_of(self), dnnl::memory::data_type::f32, strides_of(self));
+        onednn_dims_of(self), dnnl::memory::data_type::f32, onednn_strides_of(self));
     dnnl::memory::desc mat2_md(
-        dims_of(mat2), dnnl::memory::data_type::f32, strides_of(mat2));
+        onednn_dims_of(mat2), dnnl::memory::data_type::f32, onednn_strides_of(mat2));
     dnnl::memory::desc out_md(
-        dims_of(out), dnnl::memory::data_type::f32, strides_of(out));
+        onednn_dims_of(out), dnnl::memory::data_type::f32, onednn_strides_of(out));
 
     // Real impl uses scratchpad_mode::user (rather than the default
     // "library" mode) so the scratchpad buffer is an explicit, visible USM

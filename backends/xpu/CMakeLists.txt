@@ -44,6 +44,7 @@ add_library(
   runtime/xpu_tensor_attribute.cpp
   runtime/xpu_memory.cpp
   runtime/xpu_gemm.cpp
+  runtime/xpu_sdpa.cpp
 )
 
 target_include_directories(

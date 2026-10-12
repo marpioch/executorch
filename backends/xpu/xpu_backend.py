@@ -48,6 +48,7 @@ class XpuBackend(AotiBackend, BackendDetails):
     def get_supported_fallback_kernels(cls) -> Dict[str, Any]:
         return {
             "aoti_torch_xpu_mm_out": None,
+            "aoti_torch_xpu__scaled_dot_product_fused_attention_overrideable": None,
         }
 
     @classmethod
