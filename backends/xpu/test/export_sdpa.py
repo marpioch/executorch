@@ -3,6 +3,13 @@ this on the PTL (XPU-capable) machine. Plain multi-head attention: no causal
 mask, no GQA (num_heads_q == num_heads_kv), no attn_mask -- the simplest case
 to validate aoti_torch_xpu__scaled_dot_product_fused_attention_overrideable's
 basic plumbing before testing causal/GQA variants.
+
+executor_runner always fills inputs with all-ones at runtime (export only
+fixes shapes/dtypes, not data), so this module adds fixed, seeded per-element
+offsets to the (all-ones) input before SDPA -- that gives genuinely
+distinguishable, non-uniform Q/K/V without depending on executor_runner's
+input values. The eager reference output (computed here on the same all-ones
+input) is printed so it can be diffed against executor_runner's output.
 """
 import torch
 from executorch.backends.xpu.xpu_backend import XpuBackend
@@ -17,17 +24,33 @@ HEAD_DIM = 8
 
 
 class SDPAModule(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        generator = torch.Generator().manual_seed(0)
+        shape = (BATCH, NUM_HEADS, SEQ_LEN, HEAD_DIM)
+        self.q_offset = torch.nn.Parameter(torch.randn(shape, generator=generator))
+        self.k_offset = torch.nn.Parameter(torch.randn(shape, generator=generator))
+        self.v_offset = torch.nn.Parameter(torch.randn(shape, generator=generator))
+
     def forward(self, q, k, v):
-        return torch.nn.functional.scaled_dot_product_attention(q, k, v)
+        return torch.nn.functional.scaled_dot_product_attention(
+            q + self.q_offset, k + self.k_offset, v + self.v_offset
+        )
 
 
 def main() -> None:
     model = SDPAModule().eval()
     example_inputs = (
-        torch.randn(BATCH, NUM_HEADS, SEQ_LEN, HEAD_DIM),
-        torch.randn(BATCH, NUM_HEADS, SEQ_LEN, HEAD_DIM),
-        torch.randn(BATCH, NUM_HEADS, SEQ_LEN, HEAD_DIM),
+        torch.ones(BATCH, NUM_HEADS, SEQ_LEN, HEAD_DIM),
+        torch.ones(BATCH, NUM_HEADS, SEQ_LEN, HEAD_DIM),
+        torch.ones(BATCH, NUM_HEADS, SEQ_LEN, HEAD_DIM),
     )
+
+    with torch.no_grad():
+        expected = model(*example_inputs)
+    print("Eager reference output (compare against executor_runner's):")
+    print(expected)
+
     exported_program = torch.export.export(model, example_inputs)
 
     partitioner = XpuPartitioner(
