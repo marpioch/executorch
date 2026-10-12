@@ -48,6 +48,10 @@ class XpuBackend(AotiBackend, BackendDetails):
     def get_supported_fallback_kernels(cls) -> Dict[str, Any]:
         return {
             "aoti_torch_xpu_mm_out": None,
+            # An operator named the way it is registered also needs the name
+            # Inductor derives for it, so it appears under both (see Metal's
+            # get_supported_fallback_kernels for the same pattern).
+            "at::_ops::_scaled_dot_product_fused_attention_overrideable::call": None,
             "aoti_torch_xpu__scaled_dot_product_fused_attention_overrideable": None,
         }
 
