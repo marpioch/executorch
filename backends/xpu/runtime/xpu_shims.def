@@ -44,6 +44,7 @@ EXPORTS
     aoti_torch_get_sizes
     aoti_torch_get_dtype
     aoti_torch_dtype_float32
+    aoti_torch_dtype_bfloat16
     aoti_torch_layout_strided
     aoti_torch__reinterpret_tensor
     aoti_torch_xpu_mm_out

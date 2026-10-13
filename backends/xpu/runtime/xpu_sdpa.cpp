@@ -46,6 +46,18 @@ using dnnl::graph::logical_tensor;
 using dnnl::graph::op;
 using data_type = logical_tensor::data_type;
 
+// float32 and bf16 only (matches xpu_gemm.cpp's scope); real PyTorch also
+// allows f16, left out here since nothing exercises it yet.
+bool is_supported_sdpa_dtype(executorch::aten::ScalarType t) {
+  return t == executorch::aten::ScalarType::Float ||
+      t == executorch::aten::ScalarType::BFloat16;
+}
+
+data_type to_graph_dtype(executorch::aten::ScalarType t) {
+  return t == executorch::aten::ScalarType::BFloat16 ? data_type::bf16
+                                                      : data_type::f32;
+}
+
 } // namespace
 
 extern "C" {
@@ -82,12 +94,12 @@ AOTITorchError aoti_torch_xpu__scaled_dot_product_fused_attention_overrideable(
       "aoti_torch_xpu__scaled_dot_product_fused_attention_overrideable: "
       "query/key/value must be 4-D [B, H, T, Dh]");
   ET_CHECK_OR_RETURN_ERROR(
-      query->scalar_type() == executorch::aten::ScalarType::Float &&
-          key->scalar_type() == executorch::aten::ScalarType::Float &&
-          value->scalar_type() == executorch::aten::ScalarType::Float,
+      is_supported_sdpa_dtype(query->scalar_type()) &&
+          key->scalar_type() == query->scalar_type() &&
+          value->scalar_type() == query->scalar_type(),
       InvalidArgument,
       "aoti_torch_xpu__scaled_dot_product_fused_attention_overrideable: "
-      "only float32 is supported");
+      "query/key/value must be float32 or bfloat16 (and match each other)");
   ET_CHECK_OR_RETURN_ERROR(
       dropout_p == 0.0,
       InvalidArgument,
@@ -123,18 +135,22 @@ AOTITorchError aoti_torch_xpu__scaled_dot_product_fused_attention_overrideable(
       "num_heads(query) must be a multiple of num_heads(key/value)");
   if (has_attn_bias) {
     ET_CHECK_OR_RETURN_ERROR(
-        (*attn_bias)->scalar_type() == executorch::aten::ScalarType::Float,
+        is_supported_sdpa_dtype((*attn_bias)->scalar_type()),
         InvalidArgument,
         "aoti_torch_xpu__scaled_dot_product_fused_attention_overrideable: "
-        "attn_bias must be float32");
+        "attn_bias must be float32 or bfloat16");
   }
 
   const double scale_d =
       scale != nullptr ? *scale : (1.0 / std::sqrt(static_cast<double>(head_dim_qk)));
   float softmax_scale = static_cast<float>(scale_d);
 
+  const data_type dtype = to_graph_dtype(query->scalar_type());
   const int32_t device_index = c10::xpu::current_device();
-  const int32_t dtype_f32 = aoti_torch_dtype_float32();
+  const int32_t dtype_code = query->scalar_type() == executorch::aten::ScalarType::BFloat16
+      ? aoti_torch_dtype_bfloat16()
+      : aoti_torch_dtype_float32();
+  const int32_t dtype_f32 = aoti_torch_dtype_float32(); // causal mask is always f32
   const int32_t device_type_xpu = aoti_torch_device_type_xpu();
 
   // Allocate the (contiguous) output tensor [B, H_q, T_q, Dv].
@@ -149,7 +165,7 @@ AOTITorchError aoti_torch_xpu__scaled_dot_product_fused_attention_overrideable(
       4,
       out_sizes.data(),
       out_strides.data(),
-      dtype_f32,
+      dtype_code,
       device_type_xpu,
       device_index,
       &output));
@@ -214,7 +230,7 @@ AOTITorchError aoti_torch_xpu__scaled_dot_product_fused_attention_overrideable(
         static_cast<int64_t>(qstr[1]),
         static_cast<int64_t>(qstr[2]),
         static_cast<int64_t>(qstr[3])};
-    query_lt = logical_tensor(kQueryId, data_type::f32, q_dims, q_strides);
+    query_lt = logical_tensor(kQueryId, dtype, q_dims, q_strides);
 
     dnnl::graph::logical_tensor::dims k_dims = {
         batch, group_num, 1, seq_len_kv, head_dim_qk};
@@ -224,7 +240,7 @@ AOTITorchError aoti_torch_xpu__scaled_dot_product_fused_attention_overrideable(
         0,
         static_cast<int64_t>(kstr[2]),
         static_cast<int64_t>(kstr[3])};
-    key_lt = logical_tensor(kKeyId, data_type::f32, k_dims, k_strides);
+    key_lt = logical_tensor(kKeyId, dtype, k_dims, k_strides);
 
     dnnl::graph::logical_tensor::dims v_dims = {
         batch, group_num, 1, seq_len_kv, head_dim_v};
@@ -234,7 +250,7 @@ AOTITorchError aoti_torch_xpu__scaled_dot_product_fused_attention_overrideable(
         0,
         static_cast<int64_t>(vstr[2]),
         static_cast<int64_t>(vstr[3])};
-    value_lt = logical_tensor(kValueId, data_type::f32, v_dims, v_strides);
+    value_lt = logical_tensor(kValueId, dtype, v_dims, v_strides);
 
     dnnl::graph::logical_tensor::dims o_dims = {
         batch, group_num, group_size, seq_len_q, head_dim_v};
@@ -244,17 +260,17 @@ AOTITorchError aoti_torch_xpu__scaled_dot_product_fused_attention_overrideable(
         out_strides[1],
         out_strides[2],
         out_strides[3]};
-    output_lt = logical_tensor(kOutputId, data_type::f32, o_dims, o_strides);
+    output_lt = logical_tensor(kOutputId, dtype, o_dims, o_strides);
   } else {
     query_lt = logical_tensor(
-        kQueryId, data_type::f32, onednn_dims_of(query), onednn_strides_of(query));
+        kQueryId, dtype, onednn_dims_of(query), onednn_strides_of(query));
     key_lt = logical_tensor(
-        kKeyId, data_type::f32, onednn_dims_of(key), onednn_strides_of(key));
+        kKeyId, dtype, onednn_dims_of(key), onednn_strides_of(key));
     value_lt = logical_tensor(
-        kValueId, data_type::f32, onednn_dims_of(value), onednn_strides_of(value));
+        kValueId, dtype, onednn_dims_of(value), onednn_strides_of(value));
     output_lt = logical_tensor(
         kOutputId,
-        data_type::f32,
+        dtype,
         dnnl::graph::logical_tensor::dims(out_sizes.begin(), out_sizes.end()),
         dnnl::graph::logical_tensor::dims(
             out_strides.begin(), out_strides.end()));
@@ -269,9 +285,14 @@ AOTITorchError aoti_torch_xpu__scaled_dot_product_fused_attention_overrideable(
 
   std::optional<logical_tensor> mask_lt;
   if (mask_tensor != nullptr) {
+    // Our synthetic causal mask is always f32 (added against the f32
+    // scaled_qk_out intermediate below); a user-provided attn_bias keeps
+    // its own dtype, matching PyTorch's mixed-dtype Add support here.
+    const data_type mask_dtype =
+        has_attn_bias ? to_graph_dtype(mask_tensor->scalar_type()) : data_type::f32;
     mask_lt = logical_tensor(
         kMaskId,
-        data_type::f32,
+        mask_dtype,
         onednn_dims_of(mask_tensor),
         onednn_strides_of(mask_tensor));
   }
@@ -282,7 +303,9 @@ AOTITorchError aoti_torch_xpu__scaled_dot_product_fused_attention_overrideable(
   if (mask_lt.has_value()) {
     masked_qk_out_lt = logical_tensor(kMaskedQkOutId, data_type::f32);
   }
-  logical_tensor softmax_out_lt(kSoftmaxOutId, data_type::f32);
+  // Stays at the real input dtype (not forced f32) since we never enable
+  // dropout -- matches PyTorch's own softmax_out{lt_id++, dtype} default.
+  logical_tensor softmax_out_lt(kSoftmaxOutId, dtype);
 
   size_t op_id = 0;
   op matmul_qk(

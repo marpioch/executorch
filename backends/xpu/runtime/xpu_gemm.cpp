@@ -1,10 +1,10 @@
 // Ports at::native::xpu::mm_out / at::native::onednn::matmul (see
 // pytorch/aten/src/ATen/native/mkldnn/xpu/{Blas.cpp,detail/{Matmul,Utils}.cpp}
 // in the sibling pytorch checkout) onto our libtorch-free Tensor*/engine/
-// stream types, trimmed to this PoC's scope: float32 only, 2-D only, no bias
-// (nn.Linear's bias+relu stay on the Triton-XPU elementwise path -- see the
-// mm_out/addmm_out split discovered from the real unresolved-symbol list), no
-// post-ops/broadcast/batch support.
+// stream types, trimmed to this PoC's scope: float32 or bfloat16 (self/mat2/
+// out must all match), 2-D only, no bias (nn.Linear's bias+relu stay on the
+// Triton-XPU elementwise path -- see the mm_out/addmm_out split discovered
+// from the real unresolved-symbol list), no post-ops/broadcast/batch support.
 #include <executorch/backends/xpu/runtime/xpu_gemm.h>
 
 #include <executorch/backends/xpu/runtime/xpu_functions.h>
@@ -41,6 +41,17 @@ bool has_onednn_compatible_strides(Tensor* t) {
   return n < 2 || strides[n - 1] == 1 || strides[n - 2] == 1;
 }
 
+bool is_supported_gemm_dtype(executorch::aten::ScalarType t) {
+  return t == executorch::aten::ScalarType::Float ||
+      t == executorch::aten::ScalarType::BFloat16;
+}
+
+dnnl::memory::data_type to_onednn_dtype(executorch::aten::ScalarType t) {
+  return t == executorch::aten::ScalarType::BFloat16
+      ? dnnl::memory::data_type::bf16
+      : dnnl::memory::data_type::f32;
+}
+
 } // namespace
 
 extern "C" {
@@ -55,11 +66,12 @@ AOTITorchError aoti_torch_xpu_mm_out(Tensor* out, Tensor* self, Tensor* mat2) {
       InvalidArgument,
       "aoti_torch_xpu_mm_out: mm only supports 2-D tensors");
   ET_CHECK_OR_RETURN_ERROR(
-      self->scalar_type() == executorch::aten::ScalarType::Float &&
-          mat2->scalar_type() == executorch::aten::ScalarType::Float &&
-          out->scalar_type() == executorch::aten::ScalarType::Float,
+      is_supported_gemm_dtype(self->scalar_type()) &&
+          mat2->scalar_type() == self->scalar_type() &&
+          out->scalar_type() == self->scalar_type(),
       InvalidArgument,
-      "aoti_torch_xpu_mm_out: only float32 is supported");
+      "aoti_torch_xpu_mm_out: only float32 or bfloat16 is supported (and "
+      "self/mat2/out must match)");
   ET_CHECK_OR_RETURN_ERROR(
       has_onednn_compatible_strides(self) &&
           has_onednn_compatible_strides(mat2) &&
@@ -75,12 +87,10 @@ AOTITorchError aoti_torch_xpu_mm_out(Tensor* out, Tensor* self, Tensor* mat2) {
 
     // mat2 is already [k, n] (mm_out's m2_trans=true convention), so its own
     // strides are used as-is -- no logical transpose needed.
-    dnnl::memory::desc self_md(
-        onednn_dims_of(self), dnnl::memory::data_type::f32, onednn_strides_of(self));
-    dnnl::memory::desc mat2_md(
-        onednn_dims_of(mat2), dnnl::memory::data_type::f32, onednn_strides_of(mat2));
-    dnnl::memory::desc out_md(
-        onednn_dims_of(out), dnnl::memory::data_type::f32, onednn_strides_of(out));
+    const dnnl::memory::data_type dtype = to_onednn_dtype(self->scalar_type());
+    dnnl::memory::desc self_md(onednn_dims_of(self), dtype, onednn_strides_of(self));
+    dnnl::memory::desc mat2_md(onednn_dims_of(mat2), dtype, onednn_strides_of(mat2));
+    dnnl::memory::desc out_md(onednn_dims_of(out), dtype, onednn_strides_of(out));
 
     // Real impl uses scratchpad_mode::user (rather than the default
     // "library" mode) so the scratchpad buffer is an explicit, visible USM

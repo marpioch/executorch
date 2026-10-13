@@ -6,9 +6,11 @@
  * level API than the plain dnnl::matmul primitive xpu_gemm.cpp uses). Ports
  * the "overrideable" backend XPU's dispatcher always picks (flash/cudnn/
  * efficient are not implemented for XPU), trimmed to this PoC's scope:
- * float32 only, no dropout, no logsumexp/training outputs, causal handled as
- * an explicit additive mask (matching PyTorch's own fp32 fallback), and no
- * compiled-partition caching yet (recompiles every call).
+ * float32 or bfloat16 (query/key/value must match; attn_bias/causal mask may
+ * differ -- mirrors PyTorch's own mixed-dtype Add support), no dropout, no
+ * logsumexp/training outputs, causal handled as an explicit additive f32 mask
+ * (matching PyTorch's own fp32 fallback), and no compiled-partition caching
+ * yet (recompiles every call).
  */
 #pragma once
 
