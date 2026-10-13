@@ -1,11 +1,22 @@
-"""True cross-call KV-cache persistence test for XpuBackend -- follow-up to
-export_kv_cache.py, which only validated buffer-mutation + growing-mask SDPA
-WITHIN a single trace/Run() call. This drives the SAME loaded method across
-multiple SEPARATE execute() calls (one per simulated decode step) via
-executorch.runtime's Python bindings, confirming whether mutated k_cache/
-v_cache state actually persists across calls on real XPU hardware --
-something executor_runner.exe cannot test (it always re-feeds the same fixed
-input per --num_executions iteration, with no way to vary input_pos).
+"""Export + dump reference data for the KV-cache cross-call persistence test.
+
+Companion to backends/xpu/test/kv_cache_persistence_runner.cpp, which is the
+actual test driver: it loads the .pte this script exports and calls
+Module::forward() CACHE_LEN separate times (one per simulated decode step),
+confirming whether mutated k_cache/v_cache state persists across SEPARATE
+execute() calls on real XPU hardware -- something executor_runner.exe cannot
+test (it always re-feeds the same fixed input per --num_executions
+iteration, with no way to vary input_pos) and something the Python
+executorch.runtime bindings cannot currently test either (the pip-installable
+`portable_lib` extension's build uses setup.py's "pybind" CMake preset, which
+hardcodes the Visual Studio/ClangCL toolset -- incompatible with our XPU
+backend's hard requirement on the Intel oneAPI DPC++ compiler for -fsycl).
+
+This script only does the (already well-covered) Python-side half: export the
+model, compute the eager step-by-step reference for a fixed, non-random,
+exactly-reproducible-in-C++ per-position input pattern, and write both the
+inputs and the reference output to a plain-text file the C++ runner reads
+back verbatim -- avoiding any need to match PyTorch's RNG in C++.
 """
 import torch
 import torch.nn.functional as F
@@ -74,6 +85,16 @@ def build_model() -> KVCacheStepModule:
     return KVCacheStepModule().eval()
 
 
+def make_tokens() -> torch.Tensor:
+    # Fixed, non-random, trivially reproducible in C++: token value at
+    # position `pos` is the scalar (pos + 1) * 0.1, broadcast across the
+    # whole hidden dim. Distinguishable per position (unlike an all-ones
+    # input, see export_sdpa.py's note), with no RNG to keep in sync across
+    # languages.
+    scale = (torch.arange(CACHE_LEN, dtype=torch.float32) + 1.0) * 0.1
+    return scale.view(1, CACHE_LEN, 1).expand(1, CACHE_LEN, HIDDEN_SIZE).contiguous()
+
+
 def eager_reference(tokens: torch.Tensor) -> torch.Tensor:
     model = build_model()
     outputs = []
@@ -109,15 +130,18 @@ def export_model() -> str:
     return "kv_cache_step_xpu.pte"
 
 
-def main() -> None:
-    # executor_runner-style all-ones input would make every position's token
-    # (and thus every cache entry) identical, hiding real attention-weight
-    # bugs behind a trivially-uniform output (see export_sdpa.py's note) --
-    # add a fixed seeded per-position offset so positions are distinguishable.
-    generator = torch.Generator().manual_seed(1)
-    offset = torch.randn(1, CACHE_LEN, HIDDEN_SIZE, generator=generator)
-    tokens = torch.ones(1, CACHE_LEN, HIDDEN_SIZE) + offset
+def write_reference_file(path: str, tokens: torch.Tensor, eager_output: torch.Tensor) -> None:
+    with open(path, "w") as f:
+        f.write(f"{CACHE_LEN} {HIDDEN_SIZE}\n")
+        for pos in range(CACHE_LEN):
+            values = tokens[0, pos, :].tolist()
+            f.write(" ".join(f"{v:.8g}" for v in values) + "\n")
+        flat = eager_output.reshape(-1).tolist()
+        f.write(" ".join(f"{v:.8g}" for v in flat) + "\n")
 
+
+def main() -> None:
+    tokens = make_tokens()
     eager_output = eager_reference(tokens)
     print("Eager step-by-step reference output:")
     print(eager_output)
@@ -125,29 +149,13 @@ def main() -> None:
     pte_path = export_model()
     print(f"Wrote {pte_path}")
 
-    from executorch.runtime import Runtime, Verification
-
-    runtime = Runtime.get()
-    program = runtime.load_program(pte_path, verification=Verification.Minimal)
-    method = program.load_method("forward")
-
-    et_outputs = []
-    for pos in range(CACHE_LEN):
-        token = tokens[:, pos : pos + 1, :]
-        input_pos = torch.tensor([pos], dtype=torch.long)
-        (out,) = method.execute([token, input_pos])
-        et_outputs.append(out)
-    et_output = torch.cat(et_outputs, dim=1)
-
-    print("ExecuTorch (XPU, multi-call) output:")
-    print(et_output)
-
-    max_abs_diff = (et_output - eager_output).abs().max().item()
-    print(f"Max abs diff vs eager step-by-step reference: {max_abs_diff:.6g}")
-    if max_abs_diff < 1e-3:
-        print("PASS: cross-call KV-cache state persisted correctly on XPU.")
-    else:
-        print("FAIL: ExecuTorch multi-call output diverged from eager reference.")
+    ref_path = "kv_cache_step_xpu_reference.txt"
+    write_reference_file(ref_path, tokens, eager_output)
+    print(f"Wrote {ref_path}")
+    print(
+        "Next: build and run kv_cache_persistence_runner "
+        f"--model_path={pte_path} --reference_path={ref_path}"
+    )
 
 
 if __name__ == "__main__":

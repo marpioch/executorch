@@ -86,3 +86,10 @@ executorch_target_link_options_shared_lib(xpu_backend)
 # to _executorch_backends) is itself part of the ExecuTorchTargets export set,
 # so every backend it links must be in that same export set too.
 install(TARGETS xpu_backend EXPORT ExecuTorchTargets DESTINATION ${CMAKE_INSTALL_LIBDIR})
+
+# kv_cache_persistence_runner (test/kv_cache_persistence_runner.cpp) is
+# defined in the top-level CMakeLists.txt instead of here: this subdirectory
+# is add_subdirectory()'d BEFORE EXECUTORCH_BUILD_EXTENSION_MODULE/TENSOR's
+# own add_subdirectory() calls run, so extension_module_static/extension_tensor
+# don't exist as targets yet at this point -- a `TARGET ...` guard here would
+# always (silently) evaluate false regardless of those options.
