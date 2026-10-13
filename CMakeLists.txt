@@ -1041,29 +1041,6 @@ if(EXECUTORCH_BUILD_EXTENSION_TENSOR)
   list(APPEND _executorch_extensions extension_tensor)
 endif()
 
-# Standalone cross-call KV-cache persistence test driver for the XPU backend
-# (backends/xpu/test/kv_cache_persistence_runner.cpp) -- calls
-# Module::forward() multiple SEPARATE times to validate mutable-buffer state
-# actually persists across calls, something executor_runner.exe (always
-# re-feeds identical fixed inputs) and the Python executorch.runtime bindings
-# (portable_lib's "pybind" CMake preset hardcodes a non-SYCL toolset,
-# incompatible with this backend) cannot test. Defined here (not in
-# backends/xpu/CMakeLists.txt) because that subdirectory is added before
-# EXECUTORCH_BUILD_EXTENSION_MODULE/TENSOR's own add_subdirectory() calls
-# above run, so extension_module_static/extension_tensor don't exist as
-# targets yet at that point.
-if(EXECUTORCH_BUILD_XPU AND TARGET extension_module_static AND TARGET extension_tensor)
-  add_executable(
-    kv_cache_persistence_runner backends/xpu/test/kv_cache_persistence_runner.cpp
-  )
-  target_compile_options(kv_cache_persistence_runner PRIVATE -fsycl)
-  target_link_options(kv_cache_persistence_runner PUBLIC -fsycl)
-  target_link_libraries(
-    kv_cache_persistence_runner PRIVATE executorch extension_module_static
-    extension_tensor xpu_backend gflags
-  )
-endif()
-
 if(EXECUTORCH_BUILD_EXTENSION_IMAGE)
   add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/extension/image)
   list(APPEND _executorch_extensions extension_image)
@@ -1781,6 +1758,29 @@ target_link_libraries(executorch_kernels INTERFACE ${_executorch_kernels})
 install(TARGETS executorch_backends executorch_extensions executorch_kernels
         EXPORT ExecuTorchTargets
 )
+
+# Standalone cross-call KV-cache persistence test driver for the XPU backend
+# (backends/xpu/test/kv_cache_persistence_runner.cpp) -- calls
+# Module::forward() multiple SEPARATE times to validate mutable-buffer state
+# actually persists across calls, something executor_runner.exe (always
+# re-feeds identical fixed inputs) and the Python executorch.runtime bindings
+# (portable_lib's "pybind" CMake preset hardcodes a non-SYCL toolset,
+# incompatible with this backend) cannot test. Defined here (not in
+# backends/xpu/CMakeLists.txt, and not right after the extension_tensor
+# block above) because extension_module_static/extension_tensor/
+# executorch_kernels (for the et_copy h2d/d2h ops the XPU-delegate boundary
+# needs) don't all exist as targets until this point in the file.
+if(EXECUTORCH_BUILD_XPU AND TARGET extension_module_static AND TARGET extension_tensor)
+  add_executable(
+    kv_cache_persistence_runner backends/xpu/test/kv_cache_persistence_runner.cpp
+  )
+  target_compile_options(kv_cache_persistence_runner PRIVATE -fsycl)
+  target_link_options(kv_cache_persistence_runner PUBLIC -fsycl)
+  target_link_libraries(
+    kv_cache_persistence_runner PRIVATE executorch extension_module_static
+    extension_tensor xpu_backend executorch_kernels gflags
+  )
+endif()
 
 if(EXECUTORCH_BUILD_EXECUTOR_RUNNER)
   # Baseline libraries that executor_runner will link against.
