@@ -110,7 +110,13 @@ def export_model() -> str:
 
 
 def main() -> None:
-    tokens = torch.ones(1, CACHE_LEN, HIDDEN_SIZE)
+    # executor_runner-style all-ones input would make every position's token
+    # (and thus every cache entry) identical, hiding real attention-weight
+    # bugs behind a trivially-uniform output (see export_sdpa.py's note) --
+    # add a fixed seeded per-position offset so positions are distinguishable.
+    generator = torch.Generator().manual_seed(1)
+    offset = torch.randn(1, CACHE_LEN, HIDDEN_SIZE, generator=generator)
+    tokens = torch.ones(1, CACHE_LEN, HIDDEN_SIZE) + offset
 
     eager_output = eager_reference(tokens)
     print("Eager step-by-step reference output:")
